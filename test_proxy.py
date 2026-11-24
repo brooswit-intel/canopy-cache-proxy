@@ -18,7 +18,7 @@ import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from proxy import CanopyCacheProxy, UpstreamError, run_server
+from proxy import CanopyCacheProxy, UpstreamError, probe_upstream_health, run_server
 
 # A minimal but structurally real classic little-endian TIFF: byte-order mark,
 # magic 42, and an IFD offset, padded out - enough to pass _is_well_formed_tiff
@@ -56,6 +56,21 @@ class MockUpstream(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(MALFORMED_BYTES)))
             self.end_headers()
             self.wfile.write(MALFORMED_BYTES)
+        elif self.path == "/chm/range-ignoring-huge.tif":
+            # Ignores any Range header and answers 200 with a large body -
+            # the exact origin shape John's 55839 flagged (WorldCover/JRC):
+            # a health probe must never be allowed to read all of this.
+            body = b"II*\x00" + b"\x08\x00\x00\x00" + (b"\x00" * (4 * 1024 * 1024))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the probe is expected to close early after its bounded read
+        elif self.path == "/chm/forbidden.tif":
+            self.send_response(403)
+            self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -296,6 +311,23 @@ class ProxyIntegrationTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             proxy.close()
+
+    def test_health_probe_rejects_bad_status_without_reading_body(self):
+        """John/MINECRAFT-571 55839: an unexpected status must be rejected
+        as unhealthy before any read."""
+        ok = probe_upstream_health(self.upstream_base, "forbidden.tif")
+        self.assertFalse(ok)
+
+    def test_health_probe_bounds_the_read_on_a_range_ignoring_huge_origin(self):
+        """John/MINECRAFT-571 55839: an origin that ignores Range and
+        answers 200 with the full (multi-MB) object must never turn a
+        health probe into a full download - the probe must still complete
+        quickly and report healthy without reading the whole body."""
+        start = time.monotonic()
+        ok = probe_upstream_health(self.upstream_base, "range-ignoring-huge.tif", timeout=5.0)
+        elapsed = time.monotonic() - start
+        self.assertTrue(ok)
+        self.assertLess(elapsed, 2.0, "a bounded read must not take anywhere near the time to transfer 4MB")
 
     def test_health_endpoint_answers_plain_head_like_earth_status_reach(self):
         """MINECRAFT-571 55789/55808/55816: EarthStatus.reach() probes the

@@ -235,12 +235,25 @@ def fetch_upstream(upstream_base: str, tile_path: str, timeout: float = 15.0, re
     raise UpstreamError(f"upstream fetch failed after {retries} attempts: {last_exc}")
 
 
+_HEALTH_PROBE_RANGE_BYTES = 16
+# One byte beyond the requested range, purely to bound the read: an origin
+# that ignores Range and answers 200 with the full multi-MB object must never
+# turn a health probe into a full download, regardless of its status.
+_HEALTH_PROBE_READ_CAP = _HEALTH_PROBE_RANGE_BYTES + 1
+
+
 def probe_upstream_health(upstream_base: str, health_path: str, timeout: float = 5.0) -> bool:
     """Dedicated health-check probe (John/MINECRAFT-571 comment 55734/55737):
     a bounded, minimum live Range request against the fixed upstream for a
     representative tile. Never reads or writes the data cache (TTL 0, no
     cache read/write), and never substitutes stale cached success for a real
-    upstream failure."""
+    upstream failure.
+
+    Per John's raster-health follow-through (MINECRAFT-571 comment 55839):
+    an unexpected status (403/404/5xx) must be rejected as unhealthy before
+    any read, and the read itself must be bounded to the tiny expected body
+    - never an unbounded read of whatever the origin sends back, which would
+    silently download the whole object if the origin ignores Range."""
     parsed = urllib.parse.urlsplit(upstream_base)
     full_path = parsed.path.rstrip("/") + "/" + health_path
     conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
@@ -249,11 +262,16 @@ def probe_upstream_health(upstream_base: str, health_path: str, timeout: float =
         conn.request(
             "GET",
             full_path,
-            headers={"User-Agent": "earth-platform-canopy-cache/1", "Range": "bytes=0-15"},
+            headers={
+                "User-Agent": "earth-platform-canopy-cache/1",
+                "Range": f"bytes=0-{_HEALTH_PROBE_RANGE_BYTES - 1}",
+            },
         )
         resp = conn.getresponse()
-        resp.read()
-        return resp.status in (200, 206)
+        if resp.status not in (200, 206):
+            return False
+        resp.read(_HEALTH_PROBE_READ_CAP)
+        return True
     except OSError:
         return False
     finally:
