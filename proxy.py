@@ -197,13 +197,19 @@ def _is_well_formed_tiff(body: bytes) -> bool:
     return magic in (42, 43)  # 42 = classic TIFF, 43 = BigTIFF
 
 
+MAX_TILE_BYTES = 128 * 1024 * 1024  # generous above any observed canopy tile (~11MB)
+
+
 def fetch_upstream(upstream_base: str, tile_path: str, timeout: float = 15.0, retries: int = 3) -> bytes:
     """Whole-object GET of the tile from the allowlisted upstream: fixed
     retries with backoff, success is 200 only, the body is read to completion
-    and checked against the declared Content-Length before being treated as
-    valid (no partial body is ever returned), and the bytes must actually be
-    a TIFF. A malformed response ("success" is a lie) is treated the same as
-    any other failed attempt: retried, never cached."""
+    (bounded to MAX_TILE_BYTES + 1 - a response at or past that bound is
+    treated as oversized/truncated transfer, never read in full and never
+    cached, matching John's 55839 unbounded-read finding applied to this
+    read path too) and checked against the declared Content-Length before
+    being treated as valid, and the bytes must actually be a TIFF. A
+    malformed response ("success" is a lie) is treated the same as any
+    other failed attempt: retried, never cached."""
     parsed = urllib.parse.urlsplit(upstream_base)
     full_path = parsed.path.rstrip("/") + "/" + tile_path
     last_exc: Exception | None = None
@@ -215,9 +221,12 @@ def fetch_upstream(upstream_base: str, tile_path: str, timeout: float = 15.0, re
         try:
             conn.request("GET", full_path, headers={"User-Agent": "earth-platform-canopy-cache/1"})
             resp = conn.getresponse()
-            body = resp.read()
+            body = resp.read(MAX_TILE_BYTES + 1)
             if resp.status != 200:
                 last_exc = UpstreamError(f"HTTP {resp.status} for {full_path}")
+                continue
+            if len(body) > MAX_TILE_BYTES:
+                last_exc = UpstreamError(f"oversized response (>{MAX_TILE_BYTES} bytes) for {full_path}")
                 continue
             declared = resp.getheader("Content-Length")
             if declared is not None and int(declared) != len(body):

@@ -18,6 +18,7 @@ import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import proxy
 from proxy import CanopyCacheProxy, UpstreamError, probe_upstream_health, run_server
 
 # A minimal but structurally real classic little-endian TIFF: byte-order mark,
@@ -311,6 +312,22 @@ class ProxyIntegrationTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             proxy.close()
+
+    def test_oversized_tile_response_is_rejected_never_cached(self):
+        """John/MINECRAFT-571 55839's unbounded-read finding applies to the
+        real tile fetch too, not just the health probe: a response at or
+        past MAX_TILE_BYTES must be rejected (bounded read, never fully
+        buffered) and never written to the cache."""
+        original_cap = proxy.MAX_TILE_BYTES
+        proxy.MAX_TILE_BYTES = 100  # TILE_BYTES (264 bytes) now counts as oversized
+        try:
+            proxy_obj = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
+            status, _, _ = proxy_obj.serve_tile("/0013113.tif", None, None)
+            self.assertEqual(status, 502)
+            self.assertIsNone(proxy_obj.cache.get("0013113.tif"), "an oversized response must never be cached")
+            proxy_obj.close()
+        finally:
+            proxy.MAX_TILE_BYTES = original_cap
 
     def test_health_probe_rejects_bad_status_without_reading_body(self):
         """John/MINECRAFT-571 55839: an unexpected status must be rejected
