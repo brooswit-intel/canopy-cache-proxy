@@ -8,6 +8,7 @@ contract inventoried from CanopySource / live-verified against the actual
 bucket (Accept-Ranges, ETag, 206/304 semantics) so the cache mechanics under
 test are the real ones the proxy will use against the live default.
 """
+import http.client
 import os
 import shutil
 import tempfile
@@ -291,6 +292,35 @@ class ProxyIntegrationTest(unittest.TestCase):
         try:
             resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/__health", timeout=5)
             self.assertEqual(resp.status, 200)
+        finally:
+            server.shutdown()
+            server.server_close()
+            proxy.close()
+
+    def test_health_endpoint_answers_plain_head_like_earth_status_reach(self):
+        """MINECRAFT-571 55789/55808/55816: EarthStatus.reach() probes the
+        configured proxy's health endpoint with a plain HTTP HEAD, not GET -
+        a handler that only implements do_GET fails this integration."""
+        server, proxy = run_server(self.db_path, 0, upstream_base=self.upstream_base)
+        proxy.health_path = "0013113.tif"
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("HEAD", "/__health")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.read(), b"", "HEAD must never return a body")
+            conn.close()
+
+            MockUpstream.fail_next["n"] = 999
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("HEAD", "/__health")
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 503)
+            resp.read()
+            conn.close()
         finally:
             server.shutdown()
             server.server_close()

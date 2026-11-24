@@ -379,6 +379,24 @@ def make_handler(proxy: CanopyCacheProxy):
         def log_message(self, fmt, *args):  # quiet; stats endpoint covers verification
             pass
 
+        def do_HEAD(self):
+            """Earth Platform's EarthStatus.reach() probes the configured
+            proxy's health endpoint with a plain HTTP HEAD (MINECRAFT-571
+            comments 55789/55808/55816) - status only, no body. Only
+            /__health answers HEAD; anything else 404s rather than
+            silently falling back to tile-serving semantics for a method
+            no client actually uses against a tile path."""
+            if self.path == "/__health":
+                ok = proxy.check_health()
+                self.send_response(200 if ok else 503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
         def do_GET(self):
             import json
 
