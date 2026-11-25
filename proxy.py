@@ -71,6 +71,36 @@ def _validate_production_upstream(url: str) -> str:
     return url
 
 _TILE_RE = re.compile(r"^[0-9]{1,10}\.tif$")
+_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _parse_byte_range(range_header: str, total: int) -> tuple[int, int] | None:
+    """Parses a single-range RFC 7233 Range header value (start-end,
+    open-ended start-, or suffix -length forms). Returns inclusive (start,
+    end) byte indices into a body of length `total`, or None if the range is
+    malformed, a multi-range request, zero-length, or unsatisfiable - the
+    caller should respond 416 in that case rather than raise."""
+    if "," in range_header:
+        return None  # multiple ranges unsupported
+    match = _RANGE_RE.match(range_header)
+    if match is None:
+        return None
+    start_s, end_s = match.groups()
+    if start_s == "" and end_s == "":
+        return None
+    if start_s == "":
+        suffix_len = int(end_s)
+        if suffix_len <= 0 or total <= 0:
+            return None
+        start = max(0, total - suffix_len)
+        end = total - 1
+    else:
+        start = int(start_s)
+        end = int(end_s) if end_s != "" else total - 1
+        end = min(end, total - 1)
+    if start < 0 or start > end or start >= total:
+        return None
+    return start, end
 
 
 def _parse_tile_path(path: str) -> str | None:
@@ -398,13 +428,11 @@ class CanopyCacheProxy:
                 self.stats.not_modified += 1
             return 304, {"ETag": etag}, b""
 
-        if range_header and range_header.startswith("bytes="):
-            start_s, _, end_s = range_header[len("bytes="):].partition("-")
-            start = int(start_s) if start_s else 0
-            end = int(end_s) if end_s else len(body) - 1
-            end = min(end, len(body) - 1)
-            if start > end or start >= len(body):
+        if range_header:
+            parsed_range = _parse_byte_range(range_header, len(body))
+            if parsed_range is None:
                 return 416, {"ETag": etag, "Content-Range": f"bytes */{len(body)}"}, b""
+            start, end = parsed_range
             chunk = body[start:end + 1]
             headers = {
                 "ETag": etag,

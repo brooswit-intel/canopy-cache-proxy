@@ -226,6 +226,68 @@ class ProxyIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 416)
         proxy.close()
 
+    def test_suffix_range_returns_final_bytes(self):
+        proxy = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
+        proxy.serve_tile("/0013113.tif", None, None)
+        status, headers, chunk = proxy.serve_tile("/0013113.tif", None, "bytes=-10")
+        self.assertEqual(status, 206)
+        self.assertEqual(chunk, TILE_BYTES[-10:])
+        self.assertEqual(
+            headers["Content-Range"], f"bytes {len(TILE_BYTES) - 10}-{len(TILE_BYTES) - 1}/{len(TILE_BYTES)}"
+        )
+        proxy.close()
+
+    def test_suffix_range_larger_than_body_clamps_to_whole_body(self):
+        proxy = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
+        proxy.serve_tile("/0013113.tif", None, None)
+        status, _, chunk = proxy.serve_tile("/0013113.tif", None, f"bytes=-{len(TILE_BYTES) + 1000}")
+        self.assertEqual(status, 206)
+        self.assertEqual(chunk, TILE_BYTES)
+        proxy.close()
+
+    def test_malformed_range_header_is_416_not_an_exception(self):
+        proxy = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
+        proxy.serve_tile("/0013113.tif", None, None)
+        for bad in ("bytes=abc", "bytes=-", "bytes=", "bytes=0-10,20-30", "bytes=-0", "items=0-5"):
+            status, _, _ = proxy.serve_tile("/0013113.tif", None, bad)
+            self.assertEqual(status, 416, f"expected 416 for malformed Range {bad!r}")
+        proxy.close()
+
+    def test_suffix_range_over_real_http(self):
+        server, srv_proxy = run_server(self.db_path, 0, upstream_base=self.upstream_base)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/0013113.tif", headers={"Range": "bytes=-10"})
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(resp.status, 206)
+            self.assertEqual(body, TILE_BYTES[-10:])
+            conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            srv_proxy.close()
+
+    def test_malformed_range_over_real_http_is_416(self):
+        server, srv_proxy = run_server(self.db_path, 0, upstream_base=self.upstream_base)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/0013113.tif", headers={"Range": "bytes=abc"})
+            resp = conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.status, 416)
+            conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            srv_proxy.close()
+
     def test_transient_upstream_failure_is_never_cached_but_retry_recovers(self):
         MockUpstream.fail_next["n"] = 1
         proxy = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
