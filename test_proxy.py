@@ -101,6 +101,36 @@ class ProxyIntegrationTest(unittest.TestCase):
         )
         proxy.close()
 
+    def test_env_override_rejects_cleartext_http(self):
+        os.environ["CANOPY_CACHE_UPSTREAM"] = "http://dataforgood-fb-data.s3.amazonaws.com/forests/v2/"
+        try:
+            with self.assertRaises(ValueError):
+                CanopyCacheProxy(self.db_path)
+        finally:
+            del os.environ["CANOPY_CACHE_UPSTREAM"]
+
+    def test_env_override_rejects_unallowlisted_host(self):
+        os.environ["CANOPY_CACHE_UPSTREAM"] = "https://evil.example.com/forests/v2/"
+        try:
+            with self.assertRaises(ValueError):
+                CanopyCacheProxy(self.db_path)
+        finally:
+            del os.environ["CANOPY_CACHE_UPSTREAM"]
+
+    def test_env_override_accepts_allowlisted_https_host(self):
+        os.environ["CANOPY_CACHE_UPSTREAM"] = (
+            "https://dataforgood-fb-data.s3.amazonaws.com/forests/v2/global/other_variant/chm/"
+        )
+        try:
+            proxy = CanopyCacheProxy(self.db_path)
+            self.assertEqual(
+                proxy.upstream_base,
+                "https://dataforgood-fb-data.s3.amazonaws.com/forests/v2/global/other_variant/chm/",
+            )
+            proxy.close()
+        finally:
+            del os.environ["CANOPY_CACHE_UPSTREAM"]
+
     def test_cold_fetch_then_warm_sqlite_hit_then_restart_zero_extra_upstream(self):
         proxy = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
         status, headers, body = proxy.serve_tile("/0013113.tif", None, None)

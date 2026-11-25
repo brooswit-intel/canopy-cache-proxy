@@ -49,6 +49,27 @@ DEFAULT_UPSTREAM = (
 # endpoint's bounded upstream probe - never read from or written to the data cache.
 DEFAULT_HEALTH_PATH = "0013113.tif"
 
+# Fixed, finite allowlist for the CANOPY_CACHE_UPSTREAM production override.
+# Accepting an operator-supplied scheme/host verbatim would let a misconfigured
+# deployment point tile/health traffic at an arbitrary host or cleartext http://,
+# which violates the fixed-HTTPS-allowlisted-origin requirement - so this is the
+# one override point, and it is validated, not trusted verbatim.
+_ALLOWED_UPSTREAM_HOSTS = frozenset({"dataforgood-fb-data.s3.amazonaws.com"})
+
+
+def _validate_production_upstream(url: str) -> str:
+    """Enforces HTTPS + allowlisted host on a CANOPY_CACHE_UPSTREAM override.
+    Raises ValueError if the override isn't an allowlisted HTTPS origin. Not
+    applied to the `upstream_base` constructor parameter, which is the
+    test-only direct-injection path for pointing at a local mock origin."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_UPSTREAM_HOSTS:
+        raise ValueError(
+            "CANOPY_CACHE_UPSTREAM must be an HTTPS URL on an allowlisted host "
+            f"({sorted(_ALLOWED_UPSTREAM_HOSTS)}), got: {url!r}"
+        )
+    return url
+
 _TILE_RE = re.compile(r"^[0-9]{1,10}\.tif$")
 
 
@@ -332,7 +353,13 @@ class CanopyCacheProxy:
         max_bytes: int = 512 * 1024 * 1024,
         health_path: str | None = None,
     ):
-        self.upstream_base = upstream_base or os.environ.get("CANOPY_CACHE_UPSTREAM", DEFAULT_UPSTREAM)
+        if upstream_base is not None:
+            self.upstream_base = upstream_base
+        else:
+            env_value = os.environ.get("CANOPY_CACHE_UPSTREAM")
+            self.upstream_base = (
+                _validate_production_upstream(env_value) if env_value else DEFAULT_UPSTREAM
+            )
         self.health_path = health_path or os.environ.get("CANOPY_CACHE_HEALTH_PATH", DEFAULT_HEALTH_PATH)
         self.cache = TileCache(db_path, max_bytes)
         self.stats = Stats()
