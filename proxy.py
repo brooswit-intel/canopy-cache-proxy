@@ -71,7 +71,10 @@ def _validate_production_upstream(url: str) -> str:
     return url
 
 _TILE_RE = re.compile(r"^[0-9]{1,10}\.tif$")
-_RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
+# Digit groups are bounded (far above any realistic tile size, far below
+# Python's int() conversion digit limit) so a pathological numeric field
+# can never reach int() and raise - the regex itself rejects it, -> None -> 416.
+_RANGE_RE = re.compile(r"^bytes=(\d{0,18})-(\d{0,18})$")
 
 
 def _parse_byte_range(range_header: str, total: int) -> tuple[int, int] | None:
@@ -79,7 +82,8 @@ def _parse_byte_range(range_header: str, total: int) -> tuple[int, int] | None:
     open-ended start-, or suffix -length forms). Returns inclusive (start,
     end) byte indices into a body of length `total`, or None if the range is
     malformed, a multi-range request, zero-length, or unsatisfiable - the
-    caller should respond 416 in that case rather than raise."""
+    caller should respond 416 in that case rather than raise. Never raises,
+    even on a maliciously huge numeric field."""
     if "," in range_header:
         return None  # multiple ranges unsupported
     match = _RANGE_RE.match(range_header)
@@ -88,16 +92,19 @@ def _parse_byte_range(range_header: str, total: int) -> tuple[int, int] | None:
     start_s, end_s = match.groups()
     if start_s == "" and end_s == "":
         return None
-    if start_s == "":
-        suffix_len = int(end_s)
-        if suffix_len <= 0 or total <= 0:
-            return None
-        start = max(0, total - suffix_len)
-        end = total - 1
-    else:
-        start = int(start_s)
-        end = int(end_s) if end_s != "" else total - 1
-        end = min(end, total - 1)
+    try:
+        if start_s == "":
+            suffix_len = int(end_s)
+            if suffix_len <= 0 or total <= 0:
+                return None
+            start = max(0, total - suffix_len)
+            end = total - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s != "" else total - 1
+            end = min(end, total - 1)
+    except ValueError:
+        return None
     if start < 0 or start > end or start >= total:
         return None
     return start, end

@@ -288,6 +288,35 @@ class ProxyIntegrationTest(unittest.TestCase):
             server.server_close()
             srv_proxy.close()
 
+    def test_oversized_numeric_range_field_is_416_not_an_exception(self):
+        # John/MINECRAFT-571 55955: Python's int() has a ~4300-digit
+        # conversion limit; a Range field past that must still return a
+        # controlled 416, never raise, both at the parser and over real HTTP.
+        proxy = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
+        proxy.serve_tile("/0013113.tif", None, None)
+        huge = "9" * 4301
+        for bad in (f"bytes={huge}-", f"bytes=-{huge}", f"bytes={huge}-{huge}"):
+            status, _, _ = proxy.serve_tile("/0013113.tif", None, bad)
+            self.assertEqual(status, 416, f"expected 416 for oversized Range {bad!r}")
+        proxy.close()
+
+    def test_oversized_numeric_range_field_over_real_http_is_416(self):
+        server, srv_proxy = run_server(self.db_path, 0, upstream_base=self.upstream_base)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", "/0013113.tif", headers={"Range": f"bytes={'9' * 4301}-"})
+            resp = conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.status, 416)
+            conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            srv_proxy.close()
+
     def test_transient_upstream_failure_is_never_cached_but_retry_recovers(self):
         MockUpstream.fail_next["n"] = 1
         proxy = CanopyCacheProxy(self.db_path, upstream_base=self.upstream_base)
